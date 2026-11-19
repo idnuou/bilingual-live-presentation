@@ -95,6 +95,12 @@
   .pin-input{font-size:28px!important;letter-spacing:.35em;text-align:center}
   .pin-input::placeholder{font-size:15px;letter-spacing:normal}
   .ok-msg{color:var(--ok);font-size:14px}
+  .slide.imgslide{padding:0;min-height:0;gap:0;background:#000}
+  .slide.imgslide::after{display:none}
+  .imgbox{width:100%;display:flex;align-items:center;justify-content:center;background:#0b1118}
+  .imgbox img{width:100%;height:100%;object-fit:contain;display:block}
+  .imgload{color:var(--muted);text-align:center;padding:20px;font-size:15px}
+  .slide.imgslide .foot{padding:8px 14px;margin:0;background:var(--panel)}
   .muted{color:var(--muted);font-size:14px;margin:0}
   .cloud-row{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:center;padding:0 14px 8px;font-size:13px;color:var(--muted)}
   .lc{font-size:14px;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:2px 7px;letter-spacing:.05em}
@@ -2563,13 +2569,60 @@ function show(id){ ["pin","picker","viewer","presenter"].forEach(s=>$(s).classLi
 function randomPin(n=6){ const a=new Uint32Array(n); crypto.getRandomValues(a); return Array.from(a, x=>x%10).join(""); }
 const sstore = { get(k){ try{ return sessionStorage.getItem(k); }catch(e){ return null; } }, set(k,v){ try{ sessionStorage.setItem(k,v); }catch(e){} }, del(k){ try{ sessionStorage.removeItem(k); }catch(e){} } };
 let currentParticipantPin = null;   // відомий лише ведучому
+let PRES = null;   // уся презентація (для режиму картинок: base, key, langs, aspect)
 function setPresentation(p){
   if(!p || !Array.isArray(p.slides)) return false;
-  SLIDES = p.slides; DECK = p.deck || DECK; return true;
+  SLIDES = p.slides; DECK = p.deck || DECK; PRES = p; return true;
+}
+
+/* ---------- Слайди-картинки: завантаження з GitHub Pages + розшифрування AES-256-GCM ---------- */
+const imgCache = new Map();   // "keyB64|dir|idx" -> Promise<objectURL>
+let cryptoKey = null, cryptoKeyFor = null;
+async function getKey(){
+  if(cryptoKeyFor === PRES.key && cryptoKey) return cryptoKey;
+  const raw = Uint8Array.from(atob(PRES.key), c => c.charCodeAt(0));
+  cryptoKey = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["decrypt"]);
+  cryptoKeyFor = PRES.key; return cryptoKey;
+}
+function slideImage(idx, lang){
+  if(!PRES || PRES.type !== "images" || idx < 0 || idx >= SLIDES.length) return Promise.resolve(null);
+  const dir = (PRES.langs && PRES.langs[lang]) || lang;
+  const id = `${PRES.key}|${PRES.base}${dir}|${idx}`;
+  if(!imgCache.has(id)){
+    const url = `${PRES.base}${dir}/${String(idx+1).padStart(3,"0")}.bin`;
+    const pr = (async () => {
+      const r = await fetch(url, {cache:"force-cache"});
+      if(!r.ok) throw new Error("HTTP " + r.status);
+      const buf = new Uint8Array(await r.arrayBuffer());
+      const plain = await crypto.subtle.decrypt({name:"AES-GCM", iv: buf.slice(0,12)}, await getKey(), buf.slice(12));
+      return URL.createObjectURL(new Blob([plain], {type:"image/webp"}));
+    })();
+    pr.catch(() => imgCache.delete(id));   // при помилці — спробувати знову наступного разу
+    imgCache.set(id, pr);
+  }
+  return imgCache.get(id);
+}
+function renderImageSlide(container, idx, lang){
+  const tok = `${lang}:${idx}:${Math.random()}`; container.dataset.tok = tok;
+  const ar = PRES.aspect || 0.5625;
+  container.innerHTML = `
+    <article class="slide imgslide">
+      <div class="imgbox" style="aspect-ratio:${1/ar}"><div class="imgload">…</div></div>
+      <div class="foot"><span>${esc((DECK[lang]||{}).title)}</span><span>${idx+1} / ${SLIDES.length}</span></div>
+    </article>`;
+  slideImage(idx, lang).then(u => {
+    if(container.dataset.tok !== tok || !u) return;
+    container.querySelector(".imgbox").innerHTML = `<img class="fade" alt="" src="${u}">`;
+  }).catch(err => {
+    if(container.dataset.tok !== tok) return;
+    container.querySelector(".imgbox").innerHTML = `<div class="imgload">⚠ Слайд не завантажився · Slide failed to load<br><small>${esc(err.message)}</small></div>`;
+  });
+  slideImage(idx+1, lang).catch(()=>{});   // попереднє завантаження наступного
 }
 
 function renderSlide(container, idx, lang){
   const s = SLIDES[idx]; if(!s){ container.innerHTML = ""; return; }
+  if(s.type === "image" && PRES && PRES.type === "images") return renderImageSlide(container, idx, lang);
   const c = s[lang] || s.uk || {};
   const body = s.type === "bullets"
     ? `<ul>${(c.bullets||[]).map(b=>`<li>${esc(b)}</li>`).join("")}</ul>`

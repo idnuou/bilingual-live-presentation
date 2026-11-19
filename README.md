@@ -16,6 +16,8 @@ PIN-коди в репозиторії **не зберігаються**.
 - `index.html` — застосунок (публікується на GitHub Pages)
 - `slides.js` — тексти слайдів UA/EN, **не публікується** (у `.gitignore`)
 - `publish-slides.mjs` — публікація `slides.js` у Firebase з командного рядка
+- `convert.py` — конвертер PPT/PPTX/PDF → `slides.js` (+ зашифровані картинки у `decks/`), див. ІНСТРУКЦІЯ, розділ 6
+- `decks/` — зашифровані (AES-256-GCM) картинки слайдів
 - `database.rules.json` — правила доступу Realtime Database
 - `ІНСТРУКЦІЯ.md` — покрокова інструкція
 

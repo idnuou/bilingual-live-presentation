@@ -188,6 +188,7 @@
     <strong>Скануйте, щоб приєднатися · Scan to join</strong>
     <div id="qrSvg"></div>
     <div class="url" id="qrUrl"></div>
+    <div id="qrPin" style="font-size:22px;margin:0 0 14px">PIN: <b id="qrPinVal" style="letter-spacing:.15em;font-size:30px"></b></div>
     <div class="row">
       <button id="qrCopy">Копіювати посилання</button>
       <button id="qrPrint">Друкувати</button>
@@ -2972,6 +2973,7 @@ function alertBar(msg){ const n=$("demoNote"); n.textContent=msg; n.classList.re
 function openQR(){
   const url = viewerUrl();
   $("qrUrl").textContent = url;
+  $("qrPinVal").textContent = currentParticipantPin || "—";
   try{ const qr = qrcode(0,"M"); qr.addData(url); qr.make(); $("qrSvg").innerHTML = qr.createSvgTag({cellSize:8, margin:2, scalable:true}); }
   catch(e){ $("qrSvg").textContent = "Не вдалося створити QR — скористайтесь посиланням."; }
   $("qrModal").classList.remove("hidden");

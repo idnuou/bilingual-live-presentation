@@ -24,6 +24,9 @@
     # видалити набір картинок (ID видно в бібліотеці на пульті / у папці decks)
     python convert.py --remove 20261119-034805 --push
 
+    # прибрати з GitHub усі набори, які ви видалили з бібліотеки кнопкою 🗑
+    python convert.py --sync <PIN ведучого> --push
+
 Кожна конвертація додає презентацію до БІБЛІОТЕКИ: на пульті ведучого її можна
 вибрати зі списку «📚 Презентація» і показати учасникам.
 
@@ -49,6 +52,9 @@ ROOT = Path(__file__).resolve().parent
 DECKS_DIR = ROOT / "decks"
 SLIDES_JS = ROOT / "slides.js"
 DEFAULT_SITE = "https://idnuou.github.io/bilingual-live-presentation/"
+FIREBASE_API_KEY = "AIzaSyA2W8eW7jm9MzJdh-4Zpu72Lrn1c8wUuWs"
+FIREBASE_DB = "https://bilingual-live-presentation-default-rtdb.europe-west1.firebasedatabase.app"
+PRESENTER_EMAIL = "presenter@panel.local"
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -255,6 +261,46 @@ def wait_online(url: str, timeout=240):
     return False
 
 
+def firebase_json(path: str, token: str):
+    with urllib.request.urlopen(f"{FIREBASE_DB}/{path}.json?auth={token}", timeout=20) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def sync_decks(pin: str, push: bool):
+    """Видаляє з decks/ набори картинок, яких немає в бібліотеці Firebase (і які не показуються зараз)."""
+    req = urllib.request.Request(
+        f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={FIREBASE_API_KEY}",
+        data=json.dumps({"email": PRESENTER_EMAIL, "password": pin, "returnSecureToken": True}).encode(),
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            token = json.loads(r.read())["idToken"]
+    except Exception:
+        die("Не вдалося увійти як ведучий — перевірте PIN")
+    keep = set((firebase_json("library", token) or {}).keys())
+    for room in (firebase_json("rooms", token + "&shallow=true") or {}).keys():
+        pid = firebase_json(f"rooms/{room}/presentation/id", token)
+        if pid:
+            keep.add(pid)
+    removed = []
+    if DECKS_DIR.exists():
+        for d in DECKS_DIR.iterdir():
+            if d.is_dir() and d.name not in keep:
+                shutil.rmtree(d)
+                removed.append(d.name)
+    if not removed:
+        print("✓ усі набори в decks/ є в бібліотеці — видаляти нічого")
+        return
+    print("✓ видалено набори, яких немає в бібліотеці: " + ", ".join(removed))
+    if push:
+        git("add", "-A", "decks")
+        git("commit", "-q", "-m", "Remove slides not in library: " + ", ".join(removed))
+        git("push", "-q")
+        print("✓ видалено й на GitHub")
+    else:
+        print("  (щоб видалити й на GitHub, додайте --push)")
+
+
 def write_slides_js(pres: dict):
     head = ("/* Згенеровано convert.py " + time.strftime("%Y-%m-%d %H:%M") + ".\n"
             "   ⚠ НЕ завантажуйте цей файл на хостинг (він у .gitignore): у ньому ключ розшифрування картинок.\n"
@@ -275,6 +321,7 @@ def main():
     ap.add_argument("--quality", type=int, default=82, help="якість WebP 1–100 (типово 82)")
     ap.add_argument("--prune", action="store_true", help="видалити з decks/ усі попередні набори картинок")
     ap.add_argument("--remove", metavar="ID", help="лише видалити набір decks/ID (з --push — і з GitHub) та вийти")
+    ap.add_argument("--sync", metavar="PIN", help="видалити з decks/ (з --push — і з GitHub) набори, яких немає в бібліотеці; PIN ведучого")
     ap.add_argument("--no-show", action="store_true", help="з --publish: лише додати в бібліотеку, не показувати одразу")
     ap.add_argument("--push", action="store_true", help="git commit + push картинок на GitHub")
     ap.add_argument("--publish", metavar="PIN", help="одразу опублікувати slides.js у Firebase (PIN ведучого)")
@@ -282,6 +329,9 @@ def main():
     ap.add_argument("--site", default=DEFAULT_SITE, help="адреса сайту на GitHub Pages")
     a = ap.parse_args()
 
+    if a.sync:
+        sync_decks(a.sync, a.push)
+        return
     if a.remove:
         d = DECKS_DIR / a.remove
         if not d.is_dir():

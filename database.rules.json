@@ -4,6 +4,10 @@
       ".read": "auth != null && auth.token.email == 'presenter@panel.local'",
       ".write": "auth != null && auth.token.email == 'presenter@panel.local'"
     },
+    "library": {
+      ".read": "auth != null && auth.token.email == 'presenter@panel.local'",
+      ".write": "auth != null && auth.token.email == 'presenter@panel.local'"
+    },
     "rooms": {
       "$room": {
         "presentation": {

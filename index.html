@@ -105,6 +105,7 @@
   .cloud-row{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:center;padding:0 14px 8px;font-size:13px;color:var(--muted)}
   .lc{font-size:14px;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:2px 7px;letter-spacing:.05em}
   .pin-big{font-size:18px;font-weight:700;letter-spacing:.15em;color:var(--text)}
+  #pLibSel{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font-size:14px;max-width:min(560px,90vw)}
   .chip.warn{border-color:var(--warn);color:var(--warn)}
 </style>
 </head>
@@ -160,6 +161,7 @@
   </div>
   <div class="stage" id="pStage"></div>
   <div class="next-up" id="pNextUp"></div>
+  <div class="cloud-row" id="pLib"></div>
   <div class="cloud-row" id="pCloud"></div>
   <div class="cloud-row" id="pAccess"></div>
   <div class="tools">
@@ -2533,7 +2535,8 @@ const PRESENTER_EMAIL   = "presenter@panel.local";
 const DEMO_PRESENTER_PIN   = "135790";
 const DEMO_PARTICIPANT_PIN = "246810";
 
-const ALLOW_REVIEW = true;   // учасники можуть гортати НАЗАД уже показані слайди
+const ALLOW_REVIEW = true;
+const APP_VERSION = 6;      // збільшується з кожною зміною застосунку; старі (кешовані) сторінки самі перезавантажаться   // учасники можуть гортати НАЗАД уже показані слайди
 
 /* =====================================================================
    2. ТЕКСТИ ІНТЕРФЕЙСУ / UI STRINGS
@@ -2572,6 +2575,12 @@ let currentParticipantPin = null;   // відомий лише ведучому
 let PRES = null;   // уся презентація (для режиму картинок: base, key, langs, aspect)
 function setPresentation(p){
   if(!p || !Array.isArray(p.slides)) return false;
+  if(p.appMin && p.appMin > APP_VERSION){          // сторінка застаріла (кеш браузера / GitHub Pages)
+    const u = new URL(location.href);
+    if(+u.searchParams.get("v") !== p.appMin){ u.searchParams.set("v", p.appMin); location.replace(u.toString()); }
+    else alertBar("Доступна нова версія сторінки — натисніть Ctrl+F5 · New version available — please reload");
+    return false;
+  }
   SLIDES = p.slides; DECK = p.deck || DECK; PRES = p; return true;
 }
 
@@ -2649,7 +2658,8 @@ function viewerUrl(){
      role()                  -> "presenter" | "participant" | null (поточний вхід)
      logout()
      onSlides(cb)            — презентація з хмари
-     publishSlides(p)        — лише ведучий
+     publishSlides(p)        — додати в бібліотеку й показати (лише ведучий)
+     onLibrary(cb), activateDeck(entry), deleteDeck(id) — бібліотека презентацій
      onState(cb) / setState  — номер слайда
      announce(lang), onViewers(cb), onConn(cb)
      onDenied(cb)            — учасник втратив доступ (PIN змінено / доступ закрито)
@@ -2706,8 +2716,32 @@ function makeDemoSync(){
       store.set("bp_demo_prespin", newPin);
     },
     async resetParticipantPin(){ const pin = randomPin(6); writeAcc({participantPin:pin, notBefore:Date.now()}); return pin; },
-    onSlides(cb){ setTimeout(()=>cb(LOCAL),0); },
-    async publishSlides(){ },
+    onSlides(cb){
+      let last = null;
+      const tick = () => { const raw = store.get("bp_demo_pres_"+ROOM); if(raw !== last){ last = raw; let p = null; try{ p = JSON.parse(raw); }catch(e){} cb(p || LOCAL); } };
+      tick(); setInterval(tick, 700);
+    },
+    async publishSlides(p){
+      const id = p.id || ("d" + Date.now());
+      const lib = JSON.parse(store.get("bp_demo_lib_"+ROOM) || "{}");
+      lib[id] = Object.assign({}, p, {id, addedAt: Date.now()});
+      store.set("bp_demo_lib_"+ROOM, JSON.stringify(lib));
+      await this.activateDeck(lib[id]);
+    },
+    onLibrary(cb){
+      let last = null;
+      const tick = () => { const raw = store.get("bp_demo_lib_"+ROOM) || "{}"; if(raw !== last){ last = raw; cb(JSON.parse(raw)); } };
+      tick(); setInterval(tick, 700);
+    },
+    async activateDeck(e){
+      const pres = Object.assign({}, e, {appMin: APP_VERSION}); delete pres.addedAt;
+      store.set("bp_demo_pres_"+ROOM, JSON.stringify(pres));
+      await this.setState({slide:0, started:false, at:Date.now()});
+    },
+    async deleteDeck(id){
+      const lib = JSON.parse(store.get("bp_demo_lib_"+ROOM) || "{}"); delete lib[id];
+      store.set("bp_demo_lib_"+ROOM, JSON.stringify(lib));
+    },
     onState(cb){ stateCbs.push(cb); setTimeout(()=>cb(readState()),0); },
     async setState(st){ store.set(KEY, JSON.stringify(st)); if(ch) ch.postMessage({t:"state", s:st}); emitState(st); },
     announce(lang){ clearInterval(helloTimer); const hi=()=>{ if(ch) ch.postMessage({t:"hello", id:clientId, lang}); }; hi(); helloTimer=setInterval(hi,5000); },
@@ -2777,7 +2811,26 @@ async function makeFirebaseSync(){
     },
     async logout(){ await authMod.signOut(auth); },
     onSlides(cb){ dbMod.onValue(R("presentation"), s => cb(s.val()), () => { cb(null); denied(); }); },
-    async publishSlides(p){ await dbMod.set(R("presentation"), JSON.parse(JSON.stringify(p))); },
+    async publishSlides(p){
+      const id = (p.id || ("d" + Date.now())).replace(/[.#$\[\]\/]/g, "_");
+      const clean = JSON.parse(JSON.stringify(p));
+      const pres = Object.assign(clean, {id, appMin: APP_VERSION});
+      await dbMod.update(dbMod.ref(db), {
+        [`library/${id}`]: Object.assign({}, pres, {addedAt: dbMod.serverTimestamp()}),
+        [`rooms/${ROOM}/presentation`]: pres,
+        [`rooms/${ROOM}/state`]: {slide:0, started:false, at:Date.now()}
+      });
+    },
+    onLibrary(cb){ dbMod.onValue(dbMod.ref(db, "library"), s => cb(s.val() || {}), () => cb({})); },
+    async activateDeck(e){
+      const pres = JSON.parse(JSON.stringify(e)); delete pres.addedAt;
+      pres.appMin = Math.max(pres.appMin || 0, APP_VERSION);
+      await dbMod.update(dbMod.ref(db), {
+        [`rooms/${ROOM}/presentation`]: pres,
+        [`rooms/${ROOM}/state`]: {slide:0, started:false, at:Date.now()}
+      });
+    },
+    async deleteDeck(id){ await dbMod.remove(dbMod.ref(db, `library/${id}`)); },
     onState(cb){ dbMod.onValue(R("state"), s => cb(s.val()), () => { cb(null); denied(); }); },
     async setState(st){ await dbMod.set(R("state"), st); },
     announce(lang){
@@ -2895,14 +2948,14 @@ async function startPresenter(sync){
   // Рядок стану хмари + кнопка публікації (лише коли поруч є локальний slides.js)
   function drawCloud(){
     const row = $("pCloud");
-    if(DEMO){ row.innerHTML = `Слайди: локальний slides.js (${SLIDES.length})`; return; }
+    if(DEMO && !LOCAL){ row.innerHTML = `Слайди: локальний slides.js не знайдено`; return; }
     const inCloud = cloud && Array.isArray(cloud.slides) ? cloud.slides.length : 0;
     let html = `☁ У хмарі: ${inCloud ? inCloud+" слайдів" : "немає"}`;
     html += ` <label class="chip" style="cursor:pointer">📂 Обрати slides.js<input type="file" id="pFile" accept=".js,text/javascript" hidden></label>`;
     if(LOCAL){
-      const same = cloud && JSON.stringify(cloud) === JSON.stringify(JSON.parse(JSON.stringify(LOCAL)));
-      html += ` · локально: ${LOCAL.slides.length}` +
-        ` <button class="chip ${same?"":"warn"}" id="pPublish">${same ? "✓ Актуально" : "☁ Опублікувати слайди"}</button>`;
+      const same = !!(cloud && LOCAL && ((cloud.id && cloud.id === LOCAL.id) || (cloud.key && cloud.key === LOCAL.key)));
+      html += ` · обрано файл: ${LOCAL.slides.length} сл.` +
+        ` <button class="chip ${same?"":"warn"}" id="pPublish">${same ? "✓ Показується" : "☁ Додати в бібліотеку й показати"}</button>`;
     }
     row.innerHTML = html;
     $("pFile").onchange = e => {
@@ -2924,6 +2977,38 @@ async function startPresenter(sync){
       catch(e){ btn.textContent = "Помилка — перевірте правила доступу"; }
     };
   }
+
+  // --- бібліотека презентацій ---
+  let library = {};
+  function drawLib(){
+    const row = $("pLib");
+    const items = Object.values(library).filter(e => e && e.id).sort((a,b) => (b.addedAt||0) - (a.addedAt||0));
+    const activeId = cloud && cloud.id;
+    if(!items.length){
+      row.innerHTML = `📚 Бібліотека порожня — додайте презентацію: <code>python convert.py …</code> або «📂 Обрати slides.js»`;
+      return;
+    }
+    const prevSel = $("pLibSel") ? $("pLibSel").value : activeId;
+    const fmt = t => t ? new Date(t).toLocaleString("uk-UA", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"}) : "";
+    row.innerHTML = `📚 Презентація: <select id="pLibSel">${items.map(e =>
+        `<option value="${esc(e.id)}" ${e.id === (prevSel || activeId) ? "selected" : ""}>${e.id === activeId ? "● " : ""}${esc((e.deck && e.deck.uk && e.deck.uk.title) || e.id)} · ${(e.slides||[]).length} сл. · ${e.type === "images" ? "картинки" : "текст"} · ${fmt(e.addedAt)}</option>`
+      ).join("")}</select> <button class="chip" id="pLibShow">▶ Показати</button> <button class="chip" id="pLibDel" title="Видалити з бібліотеки">🗑</button>`;
+    $("pLibShow").onclick = async () => {
+      const e = library[$("pLibSel").value]; if(!e) return;
+      if(e.id === activeId && !cur.started) return;
+      if(cur.started && !confirmInline($("pLibShow"), "Точно? Показ почнеться з 1-го слайда")) return;
+      $("pLibShow").textContent = "…";
+      try{ await sync.activateDeck(e); }catch(err){ alertBar("Не вдалося перемкнути презентацію: " + (err.code || err.message)); }
+      drawLib();
+    };
+    $("pLibDel").onclick = async () => {
+      const id = $("pLibSel").value;
+      if(id === activeId){ alertBar("Цю презентацію зараз показано — спершу виберіть іншу"); return; }
+      if(!confirmInline($("pLibDel"), "Видалити?")) return;
+      try{ await sync.deleteDeck(id); }catch(err){ alertBar("Не вдалося видалити: " + (err.code || err.message)); }
+    };
+  }
+  sync.onLibrary(l => { library = l || {}; drawLib(); });
 
   // --- доступ учасників ---
   let acc = {}, pinShown = true, busy = false;
@@ -2965,7 +3050,7 @@ async function startPresenter(sync){
   }
   sync.onAccess(a => { acc = a || {}; drawAccess(); });
 
-  sync.onSlides(p => { cloud = p; setPresentation(DEMO ? LOCAL : p) || (SLIDES = []); cur.slide = clampIdx(cur.slide); draw(); });
+  sync.onSlides(p => { cloud = p; setTimeout(drawLib, 0); setPresentation(p) || (SLIDES = []); cur.slide = clampIdx(cur.slide); draw(); });
   sync.onConn(v => { ok=v; draw(); });
   sync.onState(st => { if(st && typeof st.slide==="number") cur = {slide:clampIdx(st.slide), started:!!st.started}; draw(); });
   sync.onViewers(c => { counts=c; draw(); });

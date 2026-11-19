@@ -21,6 +21,12 @@
     # одна мова: обидві версії показуватимуть ті самі слайди
     python convert.py --uk доповідь.pdf
 
+    # видалити набір картинок (ID видно в бібліотеці на пульті / у папці decks)
+    python convert.py --remove 20261119-034805 --push
+
+Кожна конвертація додає презентацію до БІБЛІОТЕКИ: на пульті ведучого її можна
+вибрати зі списку «📚 Презентація» і показати учасникам.
+
 Режими:
     images (типово) — кожен слайд як зображення, дизайн 1:1;
                       назви слайдів (для підказки «Наступний: …» на пульті) береться з тексту
@@ -260,19 +266,34 @@ def write_slides_js(pres: dict):
 # ---------------------------------------------------------------- головне
 def main():
     ap = argparse.ArgumentParser(description="PPT/PPTX/PDF → slides.js (+ зашифровані картинки)")
-    ap.add_argument("--uk", required=True, type=Path, help="українська версія (.ppt/.pptx/.pdf)")
+    ap.add_argument("--uk", type=Path, help="українська версія (.ppt/.pptx/.pdf)")
     ap.add_argument("--en", type=Path, help="англійська версія (якщо немає — показується українська)")
     ap.add_argument("--mode", choices=["images", "text"], default="images")
     ap.add_argument("--title-uk", help="назва презентації українською (типово — назва файлу)")
     ap.add_argument("--title-en", help="назва презентації англійською")
     ap.add_argument("--width", type=int, default=1920, help="ширина картинки, px (типово 1920)")
     ap.add_argument("--quality", type=int, default=82, help="якість WebP 1–100 (типово 82)")
-    ap.add_argument("--keep-old", action="store_true", help="не видаляти попередні набори картинок у decks/")
+    ap.add_argument("--prune", action="store_true", help="видалити з decks/ усі попередні набори картинок")
+    ap.add_argument("--remove", metavar="ID", help="лише видалити набір decks/ID (з --push — і з GitHub) та вийти")
+    ap.add_argument("--no-show", action="store_true", help="з --publish: лише додати в бібліотеку, не показувати одразу")
     ap.add_argument("--push", action="store_true", help="git commit + push картинок на GitHub")
     ap.add_argument("--publish", metavar="PIN", help="одразу опублікувати slides.js у Firebase (PIN ведучого)")
     ap.add_argument("--room", default="panel")
     ap.add_argument("--site", default=DEFAULT_SITE, help="адреса сайту на GitHub Pages")
     a = ap.parse_args()
+
+    if a.remove:
+        d = DECKS_DIR / a.remove
+        if not d.is_dir():
+            die(f"Немає набору decks/{a.remove}")
+        shutil.rmtree(d)
+        print(f"✓ видалено decks/{a.remove}")
+        if a.push:
+            git("add", "-A", "decks"); git("commit", "-q", "-m", f"Remove slides {a.remove}"); git("push", "-q")
+            print("✓ видалено й на GitHub. Не забудьте прибрати її з бібліотеки на пульті (🗑).")
+        return
+    if not a.uk:
+        die("Вкажіть презентацію: --uk файл.pptx|.pdf")
 
     for f in (a.uk, a.en):
         if f and not f.is_file():
@@ -314,7 +335,7 @@ def main():
                     if typ == "bullets":
                         s.setdefault("bullets", [])
                 slides.append({"type": typ, "uk": u, "en": e})
-            pres = {"deck": deck, "slides": slides}
+            pres = {"id": "text-" + time.strftime("%Y%m%d-%H%M%S"), "deck": deck, "slides": slides}
             write_slides_js(pres)
             print(f"✓ slides.js: {n} текстових слайдів. Перевірте й за потреби відредагуйте тексти.")
 
@@ -348,11 +369,11 @@ def main():
 
             slides = [{"type": "image", "uk": {"title": title_of("uk", i)}, "en": {"title": title_of("en", i)}}
                       for i in range(n)]
-            pres = {"deck": deck, "type": "images", "base": f"decks/{deck_id}/", "langs": langs,
+            pres = {"id": deck_id, "deck": deck, "type": "images", "base": f"decks/{deck_id}/", "langs": langs,
                     "aspect": round(dims[1] / dims[0], 5), "key": base64.b64encode(key).decode(), "slides": slides}
             write_slides_js(pres)
 
-            if not a.keep_old and DECKS_DIR.exists():
+            if a.prune and DECKS_DIR.exists():
                 for old in DECKS_DIR.iterdir():
                     if old.is_dir() and old.name != deck_id:
                         shutil.rmtree(old, ignore_errors=True)
@@ -372,7 +393,7 @@ def main():
                 print("⚠ без --push картинки не потраплять на сайт; учасники їх не побачать")
 
     if a.publish:
-        r = subprocess.run(["node", str(ROOT / "publish-slides.mjs"), a.publish, a.room], cwd=ROOT)
+        r = subprocess.run(["node", str(ROOT / "publish-slides.mjs"), a.publish, a.room] + (["--no-show"] if a.no_show else []), cwd=ROOT)
         if r.returncode != 0:
             die("Публікацію у Firebase не виконано")
     else:

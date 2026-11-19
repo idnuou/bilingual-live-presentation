@@ -93,6 +93,8 @@
 </style>
 <style>
   .pin-input{font-size:28px!important;letter-spacing:.35em;text-align:center}
+  .pin-input::placeholder{font-size:15px;letter-spacing:normal}
+  .ok-msg{color:var(--ok);font-size:14px}
   .muted{color:var(--muted);font-size:14px;margin:0}
   .cloud-row{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:center;padding:0 14px 8px;font-size:13px;color:var(--muted)}
   .lc{font-size:14px;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:2px 7px;letter-spacing:.05em}
@@ -157,6 +159,7 @@
   <div class="tools">
     <button class="chip" id="pQR">QR-код для учасників</button>
     <button class="chip" id="pFirst">⟲ На 1-й слайд</button>
+    <button class="chip" id="pMyPin">🔑 Мій PIN</button>
     <button class="chip" id="pOut">⏏ Вийти</button>
   </div>
   <div class="controls">
@@ -164,6 +167,20 @@
     <button class="ctrl next" id="pNext">Далі ›</button>
   </div>
 </section>
+
+<!-- ======================= PRESENTER PIN MODAL ======================= -->
+<div id="myPinModal" class="modal hidden">
+  <form class="card" id="myPinForm" autocomplete="off">
+    <h3>🔑 Змінити PIN ведучого</h3>
+    <p class="muted">Новий PIN: від 8 до 12 цифр. PIN учасника завжди має 6 цифр, тому коди не збіжуться.</p>
+    <input id="mpOld"  class="pin-input" type="password" inputmode="numeric" maxlength="12" placeholder="Поточний PIN" autocomplete="current-password">
+    <input id="mpNew"  class="pin-input" type="password" inputmode="numeric" maxlength="12" placeholder="Новий PIN" autocomplete="new-password">
+    <input id="mpNew2" class="pin-input" type="password" inputmode="numeric" maxlength="12" placeholder="Повторіть новий" autocomplete="new-password">
+    <div class="err" id="mpErr"></div>
+    <button class="primary" type="submit" id="mpSave">Зберегти</button>
+    <button class="chip" type="button" id="mpCancel">Скасувати</button>
+  </form>
+</div>
 
 <!-- ======================= QR MODAL ======================= -->
 <div id="qrModal" class="modal hidden">
@@ -2582,7 +2599,7 @@ function viewerUrl(){
      onState(cb) / setState  — номер слайда
      announce(lang), onViewers(cb), onConn(cb)
      onDenied(cb)            — учасник втратив доступ (PIN змінено / доступ закрито)
-     onAccess(cb), setAccessOpen(bool), resetParticipantPin() — лише ведучий
+     onAccess(cb), setAccessOpen(bool), resetParticipantPin(), changePresenterPin(old,new) — лише ведучий
    ===================================================================== */
 const clientId = (()=>{ let id = store.get("bp_cid"); if(!id){ id = Math.random().toString(36).slice(2,10); store.set("bp_cid",id);} return id; })();
 
@@ -2614,7 +2631,8 @@ function makeDemoSync(){
   return {
     async loginWithPin(pin){
       const acc = readAcc();
-      const r = pin===DEMO_PRESENTER_PIN ? "presenter" : pin===acc.participantPin ? "participant" : null;
+      const presPin = store.get("bp_demo_prespin") || DEMO_PRESENTER_PIN;
+      const r = pin===presPin ? "presenter" : pin===acc.participantPin ? "participant" : null;
       if(!r) throw new Error("bad");
       ss.set(AUTH, r); ss.set(AUTH+"_t", String(Date.now())); return r;
     },
@@ -2629,6 +2647,10 @@ function makeDemoSync(){
     },
     onAccess(cb){ let last=""; const tick=()=>{ const a=readAcc(), k=JSON.stringify(a); if(k!==last){ last=k; cb(a); } }; tick(); setInterval(tick, 700); },
     async setAccessOpen(v){ writeAcc({open:!!v, notBefore: v ? readAcc().notBefore : Date.now()}); },
+    async changePresenterPin(oldPin, newPin){
+      if(oldPin !== (store.get("bp_demo_prespin") || DEMO_PRESENTER_PIN)){ const e = new Error("wrong"); e.code = "auth/wrong-password"; throw e; }
+      store.set("bp_demo_prespin", newPin);
+    },
     async resetParticipantPin(){ const pin = randomPin(6); writeAcc({participantPin:pin, notBefore:Date.now()}); return pin; },
     onSlides(cb){ setTimeout(()=>cb(LOCAL),0); },
     async publishSlides(){ },
@@ -2662,6 +2684,13 @@ async function makeFirebaseSync(){
       const patch = {open: !!v};
       if(!v) patch.notBefore = dbMod.serverTimestamp();   // закриття одразу відключає всіх учасників
       await dbMod.update(ACC, patch);
+    },
+    async changePresenterPin(oldPin, newPin){
+      const u = auth.currentUser;
+      if(!u || (u.email||"").toLowerCase() !== PRESENTER_EMAIL.toLowerCase()) throw new Error("not presenter");
+      // повторна перевірка особи — Firebase вимагає її перед зміною пароля
+      await authMod.reauthenticateWithCredential(u, authMod.EmailAuthProvider.credential(PRESENTER_EMAIL, oldPin));
+      await authMod.updatePassword(u, newPin);
     },
     async resetParticipantPin(){
       const oldPin = (await dbMod.get(dbMod.child(ACC, "participantPin"))).val();
@@ -2902,6 +2931,37 @@ async function startPresenter(sync){
     if(["ArrowLeft","PageUp","Backspace"].includes(e.key)){ e.preventDefault(); if(!$("pPrev").disabled) $("pPrev").click(); }
   });
   $("pQR").onclick = openQR;
+
+  // --- зміна власного PIN ведучого ---
+  const mp = { modal:$("myPinModal"), old:$("mpOld"), n1:$("mpNew"), n2:$("mpNew2"), err:$("mpErr"), save:$("mpSave") };
+  $("pMyPin").onclick = () => {
+    mp.old.value = mp.n1.value = mp.n2.value = ""; mp.err.className = "err"; mp.err.textContent = "";
+    mp.save.disabled = false; mp.modal.classList.remove("hidden"); setTimeout(()=>mp.old.focus(),50);
+  };
+  $("mpCancel").onclick = () => mp.modal.classList.add("hidden");
+  $("myPinForm").onsubmit = async e => {
+    e.preventDefault(); mp.err.className = "err"; mp.err.textContent = "";
+    const o = mp.old.value.trim(), n = mp.n1.value.trim(), n2 = mp.n2.value.trim();
+    if(!o){ mp.err.textContent = "Введіть поточний PIN"; return; }
+    if(!/^\d{8,12}$/.test(n)){ mp.err.textContent = "Новий PIN: лише цифри, від 8 до 12"; return; }
+    if(n !== n2){ mp.err.textContent = "Нові PIN-коди не збігаються"; return; }
+    if(n === o){ mp.err.textContent = "Новий PIN збігається з поточним"; return; }
+    if(/^(\d)\1+$/.test(n) || "01234567890123".includes(n) || "98765432109876".includes(n)){ mp.err.textContent = "Занадто простий PIN (однакові або послідовні цифри)"; return; }
+    mp.save.disabled = true; mp.save.textContent = "Зберігаю…";
+    try{
+      await sync.changePresenterPin(o, n);
+      mp.err.className = "ok-msg"; mp.err.textContent = "✓ PIN ведучого змінено. Використовуйте його для наступних входів.";
+      mp.old.value = mp.n1.value = mp.n2.value = "";
+      setTimeout(()=>mp.modal.classList.add("hidden"), 2500);
+    }catch(err){
+      const c = String(err.code || err.message);
+      mp.err.textContent = /wrong-password|invalid-credential|invalid-login/.test(c) ? "Поточний PIN невірний"
+                         : /too-many/.test(c) ? "Забагато спроб, зачекайте кілька хвилин"
+                         : /weak-password/.test(c) ? "Firebase відхилив PIN як слабкий"
+                         : "Не вдалося змінити PIN: " + c;
+    }finally{ mp.save.disabled = false; mp.save.textContent = "Зберегти"; }
+  };
+
   draw();
 }
 function alertBar(msg){ const n=$("demoNote"); n.textContent=msg; n.classList.remove("hidden"); n.style.background="#3a1a12"; }

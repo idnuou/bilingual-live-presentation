@@ -1,19 +1,23 @@
 {
   "rules": {
+    "access": {
+      ".read": "auth != null && auth.token.email == 'presenter@panel.local'",
+      ".write": "auth != null && auth.token.email == 'presenter@panel.local'"
+    },
     "rooms": {
       "$room": {
         "presentation": {
-          ".read": "auth != null",
+          ".read": "auth != null && (auth.token.email == 'presenter@panel.local' || (auth.token.email == 'participants@panel.local' && root.child('access/open').val() == true && auth.token.auth_time * 1000 >= root.child('access/notBefore').val()))",
           ".write": "auth != null && auth.token.email == 'presenter@panel.local'"
         },
         "state": {
-          ".read": "auth != null",
+          ".read": "auth != null && (auth.token.email == 'presenter@panel.local' || (auth.token.email == 'participants@panel.local' && root.child('access/open').val() == true && auth.token.auth_time * 1000 >= root.child('access/notBefore').val()))",
           ".write": "auth != null && auth.token.email == 'presenter@panel.local'"
         },
         "viewers": {
           ".read": "auth != null && auth.token.email == 'presenter@panel.local'",
           "$cid": {
-            ".write": "auth != null",
+            ".write": "auth != null && (auth.token.email == 'presenter@panel.local' || (auth.token.email == 'participants@panel.local' && root.child('access/open').val() == true && auth.token.auth_time * 1000 >= root.child('access/notBefore').val()))",
             ".validate": "newData.val() == 'uk' || newData.val() == 'en'"
           }
         }

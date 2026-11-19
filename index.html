@@ -96,6 +96,7 @@
   .muted{color:var(--muted);font-size:14px;margin:0}
   .cloud-row{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:center;padding:0 14px 8px;font-size:13px;color:var(--muted)}
   .lc{font-size:14px;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:2px 7px;letter-spacing:.05em}
+  .pin-big{font-size:18px;font-weight:700;letter-spacing:.15em;color:var(--text)}
   .chip.warn{border-color:var(--warn);color:var(--warn)}
 </style>
 </head>
@@ -152,6 +153,7 @@
   <div class="stage" id="pStage"></div>
   <div class="next-up" id="pNextUp"></div>
   <div class="cloud-row" id="pCloud"></div>
+  <div class="cloud-row" id="pAccess"></div>
   <div class="tools">
     <button class="chip" id="pQR">QR-код для учасників</button>
     <button class="chip" id="pFirst">⟲ На 1-й слайд</button>
@@ -2540,6 +2542,9 @@ const store = {
 function esc(s){ return String(s ?? "").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function clampIdx(i){ return Math.max(0, Math.min(Math.max(SLIDES.length-1,0), i|0)); }
 function show(id){ ["pin","picker","viewer","presenter"].forEach(s=>$(s).classList.toggle("hidden", s!==id)); }
+function randomPin(n=6){ const a=new Uint32Array(n); crypto.getRandomValues(a); return Array.from(a, x=>x%10).join(""); }
+const sstore = { get(k){ try{ return sessionStorage.getItem(k); }catch(e){ return null; } }, set(k,v){ try{ sessionStorage.setItem(k,v); }catch(e){} }, del(k){ try{ sessionStorage.removeItem(k); }catch(e){} } };
+let currentParticipantPin = null;   // відомий лише ведучому
 function setPresentation(p){
   if(!p || !Array.isArray(p.slides)) return false;
   SLIDES = p.slides; DECK = p.deck || DECK; return true;
@@ -2576,6 +2581,8 @@ function viewerUrl(){
      publishSlides(p)        — лише ведучий
      onState(cb) / setState  — номер слайда
      announce(lang), onViewers(cb), onConn(cb)
+     onDenied(cb)            — учасник втратив доступ (PIN змінено / доступ закрито)
+     onAccess(cb), setAccessOpen(bool), resetParticipantPin() — лише ведучий
    ===================================================================== */
 const clientId = (()=>{ let id = store.get("bp_cid"); if(!id){ id = Math.random().toString(36).slice(2,10); store.set("bp_cid",id);} return id; })();
 
@@ -2601,13 +2608,28 @@ function makeDemoSync(){
     viewerCbs.forEach(cb=>cb(c));
   }, 2000);
   let helloTimer=null;
+  const ACC = "bp_demo_access_"+ROOM;
+  const readAcc = () => { try{ return Object.assign({open:true, participantPin:DEMO_PARTICIPANT_PIN, notBefore:0}, JSON.parse(store.get(ACC))||{}); }catch(e){ return {open:true, participantPin:DEMO_PARTICIPANT_PIN, notBefore:0}; } };
+  const writeAcc = patch => store.set(ACC, JSON.stringify(Object.assign(readAcc(), patch)));
   return {
     async loginWithPin(pin){
-      const r = pin===DEMO_PRESENTER_PIN ? "presenter" : pin===DEMO_PARTICIPANT_PIN ? "participant" : null;
-      if(!r) throw new Error("bad"); ss.set(AUTH, r); return r;
+      const acc = readAcc();
+      const r = pin===DEMO_PRESENTER_PIN ? "presenter" : pin===acc.participantPin ? "participant" : null;
+      if(!r) throw new Error("bad");
+      ss.set(AUTH, r); ss.set(AUTH+"_t", String(Date.now())); return r;
     },
     async role(){ return ss.get(AUTH); },
     async logout(){ ss.del(AUTH); },
+    onDenied(cb){
+      setInterval(()=>{
+        if(ss.get(AUTH)!=="participant") return;
+        const acc = readAcc(), t = +ss.get(AUTH+"_t")||0;
+        if(!acc.open || t < acc.notBefore) cb();
+      }, 1000);
+    },
+    onAccess(cb){ let last=""; const tick=()=>{ const a=readAcc(), k=JSON.stringify(a); if(k!==last){ last=k; cb(a); } }; tick(); setInterval(tick, 700); },
+    async setAccessOpen(v){ writeAcc({open:!!v, notBefore: v ? readAcc().notBefore : Date.now()}); },
+    async resetParticipantPin(){ const pin = randomPin(6); writeAcc({participantPin:pin, notBefore:Date.now()}); return pin; },
     onSlides(cb){ setTimeout(()=>cb(LOCAL),0); },
     async publishSlides(){ },
     onState(cb){ stateCbs.push(cb); setTimeout(()=>cb(readState()),0); },
@@ -2630,7 +2652,33 @@ async function makeFirebaseSync(){
   try{ await authMod.setPersistence(auth, authMod.browserSessionPersistence); }catch(e){}
   const R = p => dbMod.ref(db, `rooms/${ROOM}/${p}`);
   const authReady = new Promise(res => { const un = authMod.onAuthStateChanged(auth, () => { un(); res(); }); });
+  const ACC = dbMod.ref(db, "access");
+  let denyCb = null;
+  const denied = () => { if(denyCb && auth.currentUser && (auth.currentUser.email||"").toLowerCase()===PARTICIPANT_EMAIL.toLowerCase()) denyCb(); };
   return {
+    onDenied(cb){ denyCb = cb; },
+    onAccess(cb){ dbMod.onValue(ACC, s => cb(s.val()||{}), () => cb({error:true})); },
+    async setAccessOpen(v){
+      const patch = {open: !!v};
+      if(!v) patch.notBefore = dbMod.serverTimestamp();   // закриття одразу відключає всіх учасників
+      await dbMod.update(ACC, patch);
+    },
+    async resetParticipantPin(){
+      const oldPin = (await dbMod.get(dbMod.child(ACC, "participantPin"))).val();
+      if(!oldPin) throw new Error("Поточний PIN учасника невідомий (немає в access/participantPin)");
+      const newPin = randomPin(6);
+      // окремий екземпляр Firebase, щоб не вийти з облікового запису ведучого
+      const app2 = appMod.initializeApp(FIREBASE_CONFIG, "pin-reset-"+Date.now());
+      const auth2 = authMod.getAuth(app2);
+      try{
+        await authMod.setPersistence(auth2, authMod.inMemoryPersistence);
+        const cred = await authMod.signInWithEmailAndPassword(auth2, PARTICIPANT_EMAIL, String(oldPin));
+        await authMod.updatePassword(cred.user, newPin);
+        await authMod.signOut(auth2);
+      } finally { try{ await appMod.deleteApp(app2); }catch(e){} }
+      await dbMod.update(ACC, {participantPin:newPin, notBefore: dbMod.serverTimestamp()});
+      return newPin;
+    },
     async loginWithPin(pin){
       // спершу пробуємо PIN учасника, потім — ведучого
       try{ await authMod.signInWithEmailAndPassword(auth, PARTICIPANT_EMAIL, pin); return "participant"; }
@@ -2645,9 +2693,9 @@ async function makeFirebaseSync(){
       return em === PRESENTER_EMAIL.toLowerCase() ? "presenter" : em === PARTICIPANT_EMAIL.toLowerCase() ? "participant" : null;
     },
     async logout(){ await authMod.signOut(auth); },
-    onSlides(cb){ dbMod.onValue(R("presentation"), s => cb(s.val()), () => cb(null)); },
+    onSlides(cb){ dbMod.onValue(R("presentation"), s => cb(s.val()), () => { cb(null); denied(); }); },
     async publishSlides(p){ await dbMod.set(R("presentation"), JSON.parse(JSON.stringify(p))); },
-    onState(cb){ dbMod.onValue(R("state"), s => cb(s.val()), () => cb(null)); },
+    onState(cb){ dbMod.onValue(R("state"), s => cb(s.val()), () => { cb(null); denied(); }); },
     async setState(st){ await dbMod.set(R("state"), st); },
     announce(lang){
       const me = R(`viewers/${clientId}`);
@@ -2671,6 +2719,12 @@ async function makeFirebaseSync(){
 let vLang = null, live = {slide:0, started:false}, vIdx = 0, reviewing = false, connOk = false, slidesReady = false;
 
 async function startViewer(sync){
+  // --- втрата доступу: PIN змінено або доступ закрито ---
+  let kicked = false;
+  sync.onDenied(async () => {
+    if(kicked) return; kicked = true;
+    sstore.set("bp_kicked","1"); await sync.logout(); location.reload();
+  });
   // --- мова ---
   document.querySelectorAll(".lang-btn").forEach(b => b.onclick = () => pickLang(b.dataset.lang));
   document.querySelectorAll("[data-setlang]").forEach(b => b.onclick = () => pickLang(b.dataset.setlang));
@@ -2788,6 +2842,45 @@ async function startPresenter(sync){
     };
   }
 
+  // --- доступ учасників ---
+  let acc = {}, pinShown = true, busy = false;
+  function drawAccess(){
+    const row = $("pAccess");
+    if(acc.error){ row.innerHTML = "Доступ учасників: немає прав читання (оновіть правила бази)"; return; }
+    currentParticipantPin = acc.participantPin || null;
+    const open = acc.open !== false;
+    row.innerHTML =
+      `Учасники: <span class="pill ${open?"ok":"off"}">${open?"доступ відкрито":"доступ закрито"}</span>` +
+      ` PIN учасника: <span class="pin-big" id="pPinVal">${currentParticipantPin ? (pinShown ? esc(currentParticipantPin) : "••••••") : "—"}</span>` +
+      ` <button class="chip" id="pPinEye" title="Показати/сховати">👁</button>` +
+      ` <button class="chip" id="pPinNew">🔄 Новий PIN</button>` +
+      ` <button class="chip ${open?"warn":""}" id="pAccToggle">${open ? "⛔ Закрити доступ" : "✅ Відкрити доступ"}</button>`;
+    $("pPinEye").onclick = () => { pinShown = !pinShown; drawAccess(); };
+    $("pPinNew").onclick = async () => {
+      if(busy) return;
+      if(!confirmInline($("pPinNew"), "Точно? Усі учасники вийдуть")) return;
+      busy = true; $("pPinNew").textContent = "Змінюю…";
+      try{ const np = await sync.resetParticipantPin(); pinShown = true; acc = Object.assign({}, acc, {participantPin:np}); drawAccess(); }
+      catch(e){ alertBar("Не вдалося змінити PIN: " + (e.code || e.message)); drawAccess(); }
+      finally{ busy = false; }
+    };
+    $("pAccToggle").onclick = async () => {
+      if(busy) return;
+      if(open && !confirmInline($("pAccToggle"), "Точно? Усі учасники вийдуть")) return;
+      busy = true;
+      try{ await sync.setAccessOpen(!open); }catch(e){ alertBar("Не вдалося змінити доступ: " + (e.code || e.message)); }
+      finally{ busy = false; }
+    };
+  }
+  // підтвердження другим натисканням (без системних діалогів)
+  function confirmInline(btn, text){
+    if(btn.dataset.armed === "1"){ btn.dataset.armed = ""; return true; }
+    btn.dataset.armed = "1"; const old = btn.textContent; btn.textContent = text;
+    setTimeout(()=>{ if(btn.isConnected && btn.dataset.armed==="1"){ btn.dataset.armed=""; btn.textContent = old; } }, 4000);
+    return false;
+  }
+  sync.onAccess(a => { acc = a || {}; if(!busy) drawAccess(); });
+
   sync.onSlides(p => { cloud = p; setPresentation(DEMO ? LOCAL : p) || (SLIDES = []); cur.slide = clampIdx(cur.slide); draw(); });
   sync.onConn(v => { ok=v; draw(); });
   sync.onState(st => { if(st && typeof st.slide==="number") cur = {slide:clampIdx(st.slide), started:!!st.started}; draw(); });
@@ -2831,7 +2924,7 @@ $("qrPrint").onclick = () => {
     <p style="font-size:20px">Скануйте камерою телефона · Scan with your phone camera</p>
     <div style="width:420px;margin:30px auto">${$("qrSvg").innerHTML}</div>
     <p style="font-size:14px;word-break:break-all">${esc(viewerUrl())}</p>
-    <p style="font-size:22px;margin-top:30px">PIN: ______________</p>
+    <p style="font-size:26px;margin-top:30px">PIN: <b style="letter-spacing:.15em">${currentParticipantPin ? esc(currentParticipantPin) : "______________"}</b></p>
     <script>setTimeout(()=>print(),300)<\/script></body></html>`);
   w.document.close();
 };
@@ -2840,7 +2933,9 @@ $("qrPrint").onclick = () => {
    8. СТАРТ
    ===================================================================== */
 async function askPin(sync){
-  show("pin"); $("pinInput").value = ""; $("pinErr").textContent = ""; setTimeout(()=>$("pinInput").focus(),50);
+  show("pin"); $("pinInput").value = ""; setTimeout(()=>$("pinInput").focus(),50);
+  $("pinErr").textContent = sstore.get("bp_kicked") ? "Доступ закрито або PIN змінено · Access closed or PIN changed" : "";
+  sstore.del("bp_kicked");
   return new Promise(resolve => {
     $("pinForm").onsubmit = async e => {
       e.preventDefault(); $("pinErr").textContent = "";
@@ -2861,7 +2956,7 @@ async function askPin(sync){
 (async function init(){
   if(DEMO){
     const n=$("demoNote");
-    n.innerHTML = `ДЕМО-РЕЖИМ (лише вкладки цього браузера) · PIN учасника: <b>${DEMO_PARTICIPANT_PIN}</b> · PIN ведучого: <b>${DEMO_PRESENTER_PIN}</b>`;
+    n.innerHTML = `ДЕМО-РЕЖИМ (лише вкладки цього браузера) · PIN учасника: <b>${DEMO_PARTICIPANT_PIN}</b> (якщо не змінено на пульті) · PIN ведучого: <b>${DEMO_PRESENTER_PIN}</b>`;
     n.classList.remove("hidden");
   }
   let sync;

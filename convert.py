@@ -45,6 +45,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -262,11 +263,16 @@ def wait_online(url: str, timeout=240):
 
 
 def firebase_json(path: str, token: str):
-    with urllib.request.urlopen(f"{FIREBASE_DB}/{path}.json?auth={token}", timeout=20) as r:
-        return json.loads(r.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(f"{FIREBASE_DB}/{path}.json?auth={token}", timeout=20) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        die(f"Firebase відмовив у читанні «{path}» (HTTP {e.code}). Перевірте PIN ведучого та правила бази.")
+    except urllib.error.URLError as e:
+        die(f"Немає зв'язку з Firebase: {e.reason}")
 
 
-def sync_decks(pin: str, push: bool):
+def sync_decks(pin: str, push: bool, room: str = "panel"):
     """Видаляє з decks/ набори картинок, яких немає в бібліотеці Firebase (і які не показуються зараз)."""
     req = urllib.request.Request(
         f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={FIREBASE_API_KEY}",
@@ -278,10 +284,9 @@ def sync_decks(pin: str, push: bool):
     except Exception:
         die("Не вдалося увійти як ведучий — перевірте PIN")
     keep = set((firebase_json("library", token) or {}).keys())
-    for room in (firebase_json("rooms", token + "&shallow=true") or {}).keys():
-        pid = firebase_json(f"rooms/{room}/presentation/id", token)
-        if pid:
-            keep.add(pid)
+    pid = firebase_json(f"rooms/{room}/presentation/id", token)   # показується зараз — не чіпаємо
+    if pid:
+        keep.add(pid)
     removed = []
     if DECKS_DIR.exists():
         for d in DECKS_DIR.iterdir():
@@ -330,7 +335,7 @@ def main():
     a = ap.parse_args()
 
     if a.sync:
-        sync_decks(a.sync, a.push)
+        sync_decks(a.sync, a.push, a.room)
         return
     if a.remove:
         d = DECKS_DIR / a.remove

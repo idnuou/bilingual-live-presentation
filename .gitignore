@@ -1,4 +1,4 @@
-slides.js
+slides*.js
 *.mp4
 samples/
 __pycache__/

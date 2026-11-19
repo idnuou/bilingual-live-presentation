@@ -95,6 +95,7 @@
   .pin-input{font-size:28px!important;letter-spacing:.35em;text-align:center}
   .muted{color:var(--muted);font-size:14px;margin:0}
   .cloud-row{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:center;padding:0 14px 8px;font-size:13px;color:var(--muted)}
+  .lc{font-size:14px;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:2px 7px;letter-spacing:.05em}
   .chip.warn{border-color:var(--warn);color:var(--warn)}
 </style>
 </head>
@@ -118,8 +119,8 @@
   <div><h1 id="pickerTitle"></h1></div>
   <p>Оберіть мову презентації · Choose presentation language</p>
   <div class="lang-btns">
-    <button class="lang-btn" data-lang="uk">🇺🇦 Українська</button>
-    <button class="lang-btn" data-lang="en">🇬🇧 English</button>
+    <button class="lang-btn" data-lang="uk"><b class="lc">UA</b> Українська</button>
+    <button class="lang-btn" data-lang="en"><b class="lc">EN</b> English</button>
   </div>
 </section>
 
@@ -2746,7 +2747,7 @@ async function startPresenter(sync){
     $("pPrev").disabled = cur.slide<=0 || !SLIDES.length;
     $("pNext").textContent = cur.started ? (cur.slide>=SLIDES.length-1 ? "Кінець" : "Далі ›") : "▶ Почати";
     $("pNext").disabled = !SLIDES.length || (cur.started && cur.slide>=SLIDES.length-1);
-    $("pInfo").textContent = `Кімната «${ROOM}» · учасників: 🇺🇦 ${counts.uk||0} · 🇬🇧 ${counts.en||0}`;
+    $("pInfo").textContent = `Кімната «${ROOM}» · учасників: UA ${counts.uk||0} · EN ${counts.en||0}`;
     const st = $("pStatus");
     st.className = !ok ? "pill off" : (cur.started ? "pill live" : "pill ok");
     st.textContent = !ok ? "немає зв'язку" : (cur.started ? "НАЖИВО" : "готово");

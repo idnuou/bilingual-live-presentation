@@ -283,10 +283,22 @@ def sync_decks(pin: str, push: bool, room: str = "panel"):
             token = json.loads(r.read())["idToken"]
     except Exception:
         die("Не вдалося увійти як ведучий — перевірте PIN")
-    keep = set((firebase_json("library", token) or {}).keys())
-    pid = firebase_json(f"rooms/{room}/presentation/id", token)   # показується зараз — не чіпаємо
-    if pid:
-        keep.add(pid)
+    def deck_dirs(pres):
+        """Папки decks/, на які посилається презентація (поле base, напр. "decks/20261119-034805/")."""
+        out = set()
+        if isinstance(pres, dict):
+            base = str(pres.get("base") or "").strip("/")
+            if base.startswith("decks/"):
+                out.add(base.split("/", 1)[1].split("/")[0])
+            if pres.get("id"):
+                out.add(str(pres["id"]))
+        return out
+
+    library = firebase_json("library", token) or {}
+    keep = set(library.keys())
+    for entry in library.values():
+        keep |= deck_dirs(entry)
+    keep |= deck_dirs(firebase_json(f"rooms/{room}/presentation", token))   # показується зараз — не чіпаємо
     removed = []
     if DECKS_DIR.exists():
         for d in DECKS_DIR.iterdir():

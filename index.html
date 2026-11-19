@@ -2861,15 +2861,16 @@ async function startPresenter(sync){
       if(!confirmInline($("pPinNew"), "Точно? Усі учасники вийдуть")) return;
       busy = true; $("pPinNew").textContent = "Змінюю…";
       try{ const np = await sync.resetParticipantPin(); pinShown = true; acc = Object.assign({}, acc, {participantPin:np}); drawAccess(); }
-      catch(e){ alertBar("Не вдалося змінити PIN: " + (e.code || e.message)); drawAccess(); }
-      finally{ busy = false; }
+      catch(e){ alertBar("Не вдалося змінити PIN: " + (e.code || e.message)); }
+      finally{ busy = false; drawAccess(); }
     };
     $("pAccToggle").onclick = async () => {
       if(busy) return;
       if(open && !confirmInline($("pAccToggle"), "Точно? Усі учасники вийдуть")) return;
       busy = true;
+      $("pAccToggle").textContent = "…";
       try{ await sync.setAccessOpen(!open); }catch(e){ alertBar("Не вдалося змінити доступ: " + (e.code || e.message)); }
-      finally{ busy = false; }
+      finally{ busy = false; drawAccess(); }
     };
   }
   // підтвердження другим натисканням (без системних діалогів)
@@ -2879,7 +2880,7 @@ async function startPresenter(sync){
     setTimeout(()=>{ if(btn.isConnected && btn.dataset.armed==="1"){ btn.dataset.armed=""; btn.textContent = old; } }, 4000);
     return false;
   }
-  sync.onAccess(a => { acc = a || {}; if(!busy) drawAccess(); });
+  sync.onAccess(a => { acc = a || {}; drawAccess(); });
 
   sync.onSlides(p => { cloud = p; setPresentation(DEMO ? LOCAL : p) || (SLIDES = []); cur.slide = clampIdx(cur.slide); draw(); });
   sync.onConn(v => { ok=v; draw(); });
